@@ -1,12 +1,13 @@
 {
   "name": "node-video-proxy",
-  "version": "1.0.0",
+  "version": "1.0.2",
   "main": "server.js",
   "scripts": {
     "start": "node server.js",
     "dev": "node server.js"
   },
   "dependencies": {
+    "@capacitor/status-bar": "^8.0.0",
     "axios": "^1.6.0",
     "better-sqlite3": "^12.5.0",
     "body-parser": "^1.20.2",
