@@ -2695,6 +2695,7 @@
             padding: 1px;
             background: linear-gradient(135deg, #e50914, #ff6b6b, #e50914);
             -webkit-mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
+            mask: linear-gradient(#fff 0 0) content-box, linear-gradient(#fff 0 0);
             -webkit-mask-composite: xor;
             mask-composite: exclude;
             opacity: 0;
@@ -3823,9 +3824,6 @@
                     localStorage.setItem(V2B_LAST_CHECK_KEY, Date.now().toString());
                     if (data.v2boardToken) {
                         localStorage.setItem(V2B_TOKEN_KEY, data.v2boardToken);
-                        console.log('[V2Board DEBUG] ✅ Token 已存储, 长度:', data.v2boardToken.length, ', 前16位:', data.v2boardToken.substring(0, 16) + '...');
-                    } else {
-                        console.warn('[V2Board DEBUG] ⚠️ 服务器未返回 v2boardToken!');
                     }
                     if (remember) {
                         const expiry = Date.now() + (365 * 24 * 60 * 60 * 1000); // 1年
@@ -3871,10 +3869,7 @@
             const email = localStorage.getItem(V2B_EMAIL_KEY);
             const v2bToken = localStorage.getItem(V2B_TOKEN_KEY);
 
-            console.log('[V2Board DEBUG] 验证开始 - email:', email, ', token存在:', !!v2bToken, v2bToken ? '(前16位: ' + v2bToken.substring(0, 16) + '...)' : '');
-
             if (!v2bToken) {
-                console.warn('[V2Board DEBUG] ❌ 无 token，需要重新登录');
                 return false; // 无 token，需要重新登录
             }
 
@@ -3915,47 +3910,6 @@
                 return true; // 网络错误时不阻断使用
             }
         }
-
-        // 🧪 DEBUG: 手动测试 Token 验证（在浏览器控制台运行 testV2boardToken()）
-        window.testV2boardToken = async function () {
-            console.log('=== [V2Board DEBUG] 手动测试开始 ===');
-            console.log('localStorage 状态:');
-            console.log('  AUTH_TYPE:', localStorage.getItem(AUTH_TYPE_KEY));
-            console.log('  EMAIL:', localStorage.getItem(V2B_EMAIL_KEY));
-            console.log('  TOKEN:', localStorage.getItem(V2B_TOKEN_KEY) ? '✅ 存在 (前20位: ' + localStorage.getItem(V2B_TOKEN_KEY).substring(0, 20) + '...)' : '❌ 不存在');
-            console.log('  PLAN:', localStorage.getItem(V2B_PLAN_KEY));
-            console.log('  EXPIRES:', localStorage.getItem(V2B_EXPIRES_KEY));
-            console.log('  LAST_CHECK:', localStorage.getItem(V2B_LAST_CHECK_KEY));
-
-            const v2bToken = localStorage.getItem(V2B_TOKEN_KEY);
-            const email = localStorage.getItem(V2B_EMAIL_KEY);
-            if (!v2bToken) {
-                console.error('❌ 无 V2B Token，请先登录');
-                return;
-            }
-
-            console.log('\n📡 调用 /api/auth/v2board/check ...');
-            try {
-                const res = await fetch('/api/auth/v2board/check', {
-                    method: 'POST',
-                    headers: { 'Content-Type': 'application/json' },
-                    body: JSON.stringify({ v2boardToken: v2bToken, email })
-                });
-                const data = await res.json();
-                console.log('📦 服务器响应:', JSON.stringify(data, null, 2));
-                if (data.success) {
-                    console.log('✅ Token 验证成功！套餐有效');
-                } else {
-                    console.log('❌ Token 验证失败:', data.message);
-                    if (data.tokenExpired) console.log('  → Token 已过期，需重新登录');
-                    if (data.expired) console.log('  → 套餐已过期');
-                    if (data.trafficExhausted) console.log('  → 流量已用尽');
-                }
-            } catch (e) {
-                console.error('❌ 网络错误:', e);
-            }
-            console.log('=== [V2Board DEBUG] 测试结束 ===');
-        };
         async function handlePasswordSubmit(event) {
             event.preventDefault();
 
@@ -4197,6 +4151,36 @@
 
         let dp = null;
 
+        // 💾 倍速恢复辅助 — 多次重试确保 HLS.js 不会重置
+        function ensurePlaybackSpeed(player) {
+            try {
+                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
+                if (!savedSpeed || isNaN(savedSpeed) || savedSpeed === 1) return;
+                if (!player || !player.video) return;
+
+                const applySpeed = () => {
+                    if (player.video && Math.abs(player.video.playbackRate - savedSpeed) > 0.01) {
+                        player.speed(savedSpeed);
+                    }
+                };
+
+                // 立即尝试
+                applySpeed();
+
+                // HLS.js 可能在加载后重置 playbackRate，延时重试
+                setTimeout(applySpeed, 200);
+                setTimeout(applySpeed, 500);
+                setTimeout(applySpeed, 1500);
+
+                // 在 playing 事件时也检查一次（视频真正开始播放时）
+                const onPlaying = () => {
+                    applySpeed();
+                    player.video.removeEventListener('playing', onPlaying);
+                };
+                player.video.addEventListener('playing', onPlaying);
+            } catch (e) { }
+        }
+
         createApp({
             data() {
                 return {
@@ -4290,6 +4274,7 @@
                     v2bRefreshing: false,   // 刷新订阅信息进行中
                     v2bRefreshMsg: '',      // 刷新结果消息
                     v2bRefreshOk: false,    // 刷新是否成功
+                    v2bPlanVersion: 0,      // 响应式触发器，递增时触发 v2boardAccount 重新计算
                     // footerClickCount removed (now using visible logout button)
 
                     rowLeftButtons: {}, // 存储各分类榜单左侧按钮显示状态 { movieRow: false, ... }
@@ -4579,6 +4564,8 @@
                 },
                 // V2Board 账户信息（用于设置弹窗显示）
                 v2boardAccount() {
+                    // 引用 v2bPlanVersion 触发响应式更新
+                    const _v = this.v2bPlanVersion;
                     const authType = localStorage.getItem('emax_auth_type');
                     if (authType !== 'v2board') return null;
 
@@ -5093,8 +5080,7 @@
                             }
                             this.v2bRefreshMsg = '✅ 订阅信息已更新';
                             this.v2bRefreshOk = true;
-                            // 强制 Vue 重新计算 computed
-                            this.$forceUpdate();
+                            this.v2bPlanVersion++;  // 触发 computed 重新计算
                         } else {
                             // 套餐过期或流量用尽 → 提示后自动登出
                             if (data.expired || data.trafficExhausted) {
@@ -5694,11 +5680,8 @@
                             .then(() => console.log('[投屏] 呼出投屏菜单成功'))
                             .catch((err) => {
                                 // 错误处理：
-                                // DOMException: The prompt could not be shown. (通常是因为没开机、没搜到设备或非 HTTPS)
                                 console.log('[投屏] 无法显示投屏菜单:', err);
-
-                                // 只有在明确报错无法显示菜单时，才提示用户
-                                alert('无可用投屏设备或浏览器受限。\n\n1. 请确保电视/投影已开机并连接同一WiFi\n2. 确保通过 HTTPS 访问\n3. 或使用浏览器菜单中的"投射"功能');
+                                alert('未找到投屏设备。\n\n请先在手机下拉通知栏 → 点击「投屏/Cast」→ 搜索并连接您的电视，连接成功后再点击一键投屏即可。');
                             });
                         return;
                     }
@@ -7400,14 +7383,7 @@
                         let progressRestored = false;
                         dp.on('canplay', () => {
                             // 💾 恢复倍速设置 (每次视频加载都检查)
-                            try {
-                                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
-                                if (savedSpeed && !isNaN(savedSpeed) && dp.video) {
-                                    if (Math.abs(dp.video.playbackRate - savedSpeed) > 0.01) {
-                                        dp.speed(savedSpeed);
-                                    }
-                                }
-                            } catch (e) { }
+                            ensurePlaybackSpeed(dp);
 
                             if (progressRestored) return;
 
@@ -7611,15 +7587,7 @@
                             console.log('[进度记忆-切换] progressRestored:', progressRestored);
 
                             // 💾 恢复倍速设置 (每次切换视频都检查)
-                            try {
-                                const savedSpeed = parseFloat(localStorage.getItem('dplayer_speed'));
-                                if (savedSpeed && !isNaN(savedSpeed) && dp.video) {
-                                    if (Math.abs(dp.video.playbackRate - savedSpeed) > 0.01) {
-                                        dp.speed(savedSpeed);
-                                        console.log('[倍速恢复] 切换视频后恢复倍速:', savedSpeed + 'x');
-                                    }
-                                }
-                            } catch (e) { }
+                            ensurePlaybackSpeed(dp);
 
                             if (progressRestored) {
                                 console.log('[进度记忆-切换] 已恢复过，跳过');

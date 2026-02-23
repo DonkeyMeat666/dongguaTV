@@ -1503,6 +1503,14 @@ const v2boardRateLimitMap = new Map();
 const V2B_RATE_LIMIT = 5;
 const V2B_RATE_WINDOW = 60 * 1000; // 1分钟
 
+// 定期清理过期限流记录 (每10分钟)
+setInterval(() => {
+    const now = Date.now();
+    for (const [ip, record] of v2boardRateLimitMap) {
+        if (now > record.resetAt) v2boardRateLimitMap.delete(ip);
+    }
+}, 10 * 60 * 1000);
+
 app.post('/api/auth/v2board', async (req, res) => {
     const clientIP = req.ip || req.connection.remoteAddress;
 
